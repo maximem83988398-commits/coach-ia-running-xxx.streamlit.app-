@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 from google import genai
+from datetime import datetime, timedelta
 
 # 1. Configuration de la page Streamlit
 st.set_page_config(
@@ -23,6 +24,9 @@ except Exception:
 # 3. Initialisation du client Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Date limite pour les requêtes (30 jours en arrière)
+oldest_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
 # 4. Menu de navigation
 module = st.radio(
     "Que souhaites-tu analyser ?",
@@ -38,12 +42,13 @@ if module == "Dernière séance":
     
     if st.button("Charger et analyser la séance", type="primary"):
         with st.spinner("Récupération depuis Intervals.icu..."):
-            url = f"https://intervals.icu/api/v1/athlete/{ATHLETE_ID}/activities?limit=1"
-            # Authentification HTTP Basic requise par Intervals.icu
+            url = f"https://intervals.icu/api/v1/athlete/{ATHLETE_ID}/activities?oldest={oldest_date}"
             response = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
             
             if response.status_code == 200 and response.json():
-                act = response.json()[0]
+                # On prend la séance la plus récente
+                activities = response.json()
+                act = activities[-1] if len(activities) > 0 else activities[0]
                 
                 dist_km = act.get('distance', 0) / 1000
                 duration_min = act.get('moving_time', 0) // 60
@@ -82,11 +87,11 @@ elif module == "Bilan des 5 dernières séances":
     
     if st.button("Analyser le bloc de 5 séances", type="primary"):
         with st.spinner("Récupération des activités..."):
-            url = f"https://intervals.icu/api/v1/athlete/{ATHLETE_ID}/activities?limit=5"
+            url = f"https://intervals.icu/api/v1/athlete/{ATHLETE_ID}/activities?oldest={oldest_date}"
             response = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
             
             if response.status_code == 200 and response.json():
-                activities = response.json()
+                activities = response.json()[-5:]  # Récupère les 5 plus récentes
                 
                 summary = ""
                 for act in activities:
