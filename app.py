@@ -24,8 +24,8 @@ except Exception:
 # 3. Initialisation du client Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Nom du modèle Gemini à utiliser
-MODEL_NAME = "gemini-2.5-flash"
+# Modèle mis à jour selon les recommandations Google
+MODEL_NAME = "gemini-3.6-flash"
 
 # Date limite pour les requêtes (30 jours en arrière)
 oldest_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
