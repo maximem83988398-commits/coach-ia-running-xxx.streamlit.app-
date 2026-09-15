@@ -18,7 +18,7 @@ try:
     ATHLETE_ID = st.secrets["ATHLETE_ID"]
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except Exception:
-    st.error("Les clés d'API ne sont pas configurées dans les Secrets de Streamlit.")
+    st.error("Les clés d'API ne sont pas configurées correctement dans les Secrets de Streamlit.")
     st.stop()
 
 # 3. Initialisation du client Gemini
@@ -46,7 +46,6 @@ if module == "Dernière séance":
             response = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
             
             if response.status_code == 200 and response.json():
-                # On prend la séance la plus récente
                 activities = response.json()
                 act = activities[-1] if len(activities) > 0 else activities[0]
                 
@@ -73,13 +72,16 @@ if module == "Dernière séance":
                 """
                 
                 with st.spinner("Analyse par Gemini en cours..."):
-                    res = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt
-                    )
-                    st.markdown(res.text)
+                    try:
+                        res = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=prompt
+                        )
+                        st.markdown(res.text)
+                    except Exception as e:
+                        st.error(f"Erreur d'appel à Gemini : {e}")
             else:
-                st.error(f"Erreur {response.status_code} : {response.text}")
+                st.error(f"Erreur Intervals.icu {response.status_code} : {response.text}")
 
 # MODULE 2 : BILAN DES 5 DERNIÈRES SÉANCES
 elif module == "Bilan des 5 dernières séances":
@@ -91,7 +93,7 @@ elif module == "Bilan des 5 dernières séances":
             response = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
             
             if response.status_code == 200 and response.json():
-                activities = response.json()[-5:]  # Récupère les 5 plus récentes
+                activities = response.json()[-5:]
                 
                 summary = ""
                 for act in activities:
@@ -109,10 +111,13 @@ elif module == "Bilan des 5 dernières séances":
                 """
                 
                 with st.spinner("Analyse globale par Gemini en cours..."):
-                    res = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=prompt
-                    )
-                    st.markdown(res.text)
+                    try:
+                        res = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=prompt
+                        )
+                        st.markdown(res.text)
+                    except Exception as e:
+                        st.error(f"Erreur d'appel à Gemini : {e}")
             else:
-                st.error(f"Erreur {response.status_code} : {response.text}")
+                st.error(f"Erreur Intervals.icu {response.status_code} : {response.text}")
