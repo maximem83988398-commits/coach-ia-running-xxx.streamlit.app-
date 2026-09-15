@@ -24,6 +24,9 @@ except Exception:
 # 3. Initialisation du client Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Nom du modèle Gemini à utiliser
+MODEL_NAME = "gemini-2.5-flash"
+
 # Date limite pour les requêtes (30 jours en arrière)
 oldest_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
@@ -74,7 +77,7 @@ if module == "Dernière séance":
                 with st.spinner("Analyse par Gemini en cours..."):
                     try:
                         res = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model=MODEL_NAME,
                             contents=prompt
                         )
                         st.markdown(res.text)
@@ -113,7 +116,7 @@ elif module == "Bilan des 5 dernières séances":
                 with st.spinner("Analyse globale par Gemini en cours..."):
                     try:
                         res = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model=MODEL_NAME,
                             contents=prompt
                         )
                         st.markdown(res.text)
