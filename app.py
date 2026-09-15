@@ -1,237 +1,219 @@
 import streamlit as st
 import requests
-from google import genai
-from datetime import datetime, timedelta
+import google.generativeai as genai
 
-# 1. Configuration de la page
+# Configurer la page Streamlit
 st.set_page_config(
-    page_title="Coach IA - Running & Cyclisme",
+    page_title="Coach IA Running & Trail",
     page_icon="🏃‍♂️",
-    layout="centered"
+    layout="wide"
 )
 
-st.title("🏃‍♂️ Mon Coach IA sur Mesure")
+# ---------------------------------------------------------
+# CONFIGURATION & CLEFS API
+# ---------------------------------------------------------
+# Récupération depuis les secrets Streamlit Cloud
+INTERVALS_API_KEY = st.secrets.get("INTERVALS_API_KEY", "")
+INTERVALS_ATHLETE_ID = st.secrets.get("INTERVALS_ATHLETE_ID", "")
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# 2. Clés d'accès
-try:
-    INTERVALS_API_KEY = st.secrets["INTERVALS_API_KEY"]
-    ATHLETE_ID = st.secrets["ATHLETE_ID"]
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    st.error("Clés d'API manquantes dans les Secrets Streamlit.")
+# Validation de la présence des clés
+if not all([INTERVALS_API_KEY, INTERVALS_ATHLETE_ID, GEMINI_API_KEY]):
+    st.error("⚠️ Il manque une ou plusieurs clés API dans les secrets Streamlit (`INTERVALS_API_KEY`, `INTERVALS_ATHLETE_ID`, `GEMINI_API_KEY`).")
     st.stop()
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-3.6-flash"
+# Configuration du SDK Gemini
+genai.configure(api_key=GEMINI_API_KEY)
 
-# Fonction pour récupérer la liste des activités
-def get_activities(oldest_str, newest_str=None):
-    url = f"https://intervals.icu/api/v1/athlete/{ATHLETE_ID}/activities?oldest={oldest_str}"
-    if newest_str:
-        url += f"&newest={newest_str}"
-    res = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
-    if res.status_code == 200:
-        return res.json()
-    return None
 
-# Fonction pour récupérer les streams seconde par seconde d'une séance
+# ---------------------------------------------------------
+# FONCTIONS APIS INTERVALS.ICU
+# ---------------------------------------------------------
+def get_recent_activities(oldest_date_iso):
+    """Récupère la liste des activités depuis une date ISO (ex: YYYY-MM-DD)."""
+    url = f"https://intervals.icu/api/v1/athlete/{INTERVALS_ATHLETE_ID}/activities?oldest={oldest_date_iso}"
+    try:
+        res = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
+        if res.status_code == 200:
+            return res.json()
+        else:
+            st.error(f"Erreur d'accès à l'API Intervals.icu ({res.status_code})")
+            return None
+    except Exception as e:
+        st.error(f"Exception lors de la connexion à Intervals.icu : {e}")
+        return None
+
+
 def get_activity_streams(activity_id):
+    """
+    Récupère les streams d'une activité.
+    Transforme la liste d'objets [{'type': 'heartrate', 'data': [...]}, ...] 
+    en dictionnaire {'heartrate': [...], 'watts': [...]}.
+    """
     keys = "time,heartrate,watts,cadence,altitude,velocity_smooth"
     url = f"https://intervals.icu/api/v1/activity/{activity_id}/streams?keys={keys}"
-    res = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
-    if res.status_code == 200:
-        return res.json()
-    return None
+    try:
+        res = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
+        if res.status_code == 200:
+            raw_streams = res.json()
+            # Si l'API renvoie une liste d'objets par type de stream
+            if isinstance(raw_streams, list):
+                return {s.get('type'): s.get('data', []) for s in raw_streams if isinstance(s, dict) and 'type' in s}
+            # Si l'API renvoie déjà un dictionnaire
+            elif isinstance(raw_streams, dict):
+                return raw_streams
+        return None
+    except Exception as e:
+        st.warning(f"Impossible de récupérer les streams pour l'activité {activity_id} : {e}")
+        return None
 
-# Fonction pour récupérer le fichier brut (.fit / .gpx)
-def get_activity_file(activity_id):
-    url = f"https://intervals.icu/api/v1/activity/{activity_id}/file"
-    res = requests.get(url, auth=('API_KEY', INTERVALS_API_KEY))
-    if res.status_code == 200:
-        return res.content
-    return None
 
-# 3. Choix du mode d'analyse
-mode = st.radio(
-    "Période à analyser :",
-    ["Une séance spécifique", "Une semaine complète", "30 derniers jours"],
-    horizontal=True
+# ---------------------------------------------------------
+# INTERFACE UTILISATEUR STREAMLIT
+# ---------------------------------------------------------
+st.title("🏃‍♂️ Coach IA Running & Trail")
+st.write("Analyse automatique de tes données d'entraînement via **Intervals.icu** et **Google Gemini**.")
+
+# Barre latérale de configuration des paramètres
+with st.sidebar:
+    st.header("Paramètres")
+    start_date = st.date_input("Date de début des données", value=None, help="Sélectionne la période d'analyse")
+    
+    analysis_type = st.radio(
+        "Mode d'analyse",
+        options=["Vue d'ensemble de la période", "Focus sur une séance spécifique"]
+    )
+
+if not start_date:
+    st.info("💡 Choisis une date de début dans la barre latérale pour lancer la récupération des données.")
+    st.stop()
+
+# Conversion de la date au format ISO
+start_date_iso = start_date.strftime("%Y-%m-%d")
+
+with st.spinner("Récupération des données depuis Intervals.icu..."):
+    activities = get_recent_activities(start_date_iso)
+
+if activities is None:
+    st.stop()
+
+if not activities:
+    st.warning("Aucune activité trouvée sur la période sélectionnée.")
+    st.stop()
+
+st.success(f"{len(activities)} activité(s) chargée(s) avec succès !")
+
+# ---------------------------------------------------------
+# CONSTRUCTION DU PROMPT GEMINI
+# ---------------------------------------------------------
+system_prompt = (
+    "Tu es un entraîneur expert en course à pied, semi-marathon, marathon et trail de montagne. "
+    "Tu analyses les données brutes fournies et rédiges une synthèse claire, structurée et bienveillante "
+    "avec des conseils concréts, des alertes de surentraînement ou des encouragements."
 )
 
-st.divider()
+prompt_context = ""
 
-# --- MODE 1 : SÉANCE SPÉCIFIQUE ---
-if mode == "Une séance spécifique":
-    st.subheader("📅 Sélectionner et analyser une séance")
-    
-    selected_date = st.date_input("Date de la séance", datetime.now())
-    date_str = selected_date.strftime("%Y-%m-%d")
-    
-    activities = get_activities(date_str, date_str)
-    
-    if activities is not None:
-        if len(activities) == 0:
-            st.warning("Aucune activité enregistrée à cette date.")
-        else:
-            act_options = {f"{a.get('name')} ({a.get('type')}) - {a.get('distance', 0)/1000:.1f} km": a for a in activities}
-            chosen_label = st.selectbox("Sélectionne l'activité :", list(act_options.keys()))
-            act = act_options[chosen_label]
-            act_id = act.get('id')
-            
-            dist_km = act.get('distance', 0) / 1000
-            duration_min = act.get('moving_time', 0) // 60
-            
-            st.info(f"**{act.get('name')}** | {act.get('type')} | {dist_km:.2f} km en {duration_min} min | Charge: {act.get('icu_training_load', 'N/A')}")
-            
-            # Bouton de téléchargement du fichier brut (.fit)
-            raw_file = get_activity_file(act_id)
-            if raw_file:
-                st.download_button(
-                    label="📥 Télécharger le fichier brut d'origine (.fit)",
-                    data=raw_file,
-                    file_name=f"seance_{act_id}.fit",
-                    mime="application/octet-stream"
-                )
-            
-            # Extraction des streams (données seconde par seconde)
-            streams_summary = ""
-            streams = get_activity_streams(act_id)
-            
-            if streams:
-                hr_data = streams.get('heartrate', [])
-                watts_data = streams.get('watts', [])
-                cad_data = streams.get('cadence', [])
-                alt_data = streams.get('altitude', [])
-                
-                # Exemples de métriques calculées sur les données brutes :
-                extra_metrics = []
-                if hr_data:
-                    max_hr = max(hr_data)
-                    min_hr = min(hr_data)
-                    # Calcul de dérive cardiaque (comparaison 1ère moitié vs 2ème moitié)
-                    half = len(hr_data) // 2
-                    avg_hr_h1 = sum(hr_data[:half]) / half if half > 0 else 0
-                    avg_hr_h2 = sum(hr_data[half:]) / (len(hr_data) - half) if half > 0 else 0
-                    drift = avg_hr_h2 - avg_hr_h1
-                    extra_metrics.append(f"- FC min/max : {min_hr} / {max_hr} bpm")
-                    extra_metrics.append(f"- Dérive cardiaque (2e moitié - 1ere moitié) : {drift:+.1f} bpm")
-                
-                if watts_data:
-                    max_w = max(watts_data)
-                    extra_metrics.append(f"- Puissance max enregistrée : {max_w} W")
-                
-                if alt_data:
-                    d_plus = sum(max(0, alt_data[i] - alt_data[i-1]) for i in range(1, len(alt_data)))
-                    extra_metrics.append(f"- Dénivelé positif calculé sur le stream : {d_plus:.0f} m")
-                
-                streams_summary = "\n".join(extra_metrics)
-            
-            default_prompt = f"""Tu es mon entraîneur expert en course à pied et cyclisme. 
-Analyse cette séance en détail à partir des données résumées et des métriques fines issues du stream :
-
---- DONNÉES GÉNÉRALES ---
-- Type : {act.get('type')}
-- Distance : {dist_km:.2f} km
-- Durée : {duration_min} min
-- Charge (TSS) : {act.get('icu_training_load')}
-- FC moyenne : {act.get('average_heartrate')} bpm
-- Puissance moyenne : {act.get('average_watts')} W
-- Description : {act.get('description', 'Aucune')}
-
---- MÉTRIQUES DÉTAILLÉES (STREAMS SECONDE PAR SECONDE) ---
-{streams_summary if streams_summary else "Aucun stream disponible."}
-
-Fais un bilan structuré :
-1. Analyse de la gestion de l'effort et de la stabilité cardiaque/puissance.
-2. Impact de la séance sur la fatigue métabolique.
-3. Recommandations pour la suite de l'entraînement.
-"""
-            custom_prompt = st.text_area("✍️ Consigne / Question pour le Coach :", value=default_prompt, height=280)
-            
-            if st.button("🚀 Lancer l'analyse IA", type="primary"):
-                with st.spinner("Analyse par Gemini en cours..."):
-                    try:
-                        res = client.models.generate_content(model=MODEL_NAME, contents=custom_prompt)
-                        st.markdown(res.text)
-                    except Exception as e:
-                        st.error(f"Erreur Gemini : {e}")
-
-# --- MODE 2 : UNE SEMAINE COMPLÈTE ---
-elif mode == "Une semaine complète":
-    st.subheader("📆 Bilan d'une semaine d'entraînement")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input("Début de semaine (Lundi)", datetime.now() - timedelta(days=datetime.now().weekday()))
-    with col2:
-        end_date = start_date + timedelta(days=6)
-        st.write(f"**Fin de semaine :** {end_date.strftime('%Y-%m-%d')}")
+if analysis_type == "Vue d'ensemble de la période":
+    summary_list = []
+    for act in activities:
+        name = act.get('name', 'Sans titre')
+        type_act = act.get('type', 'Inconnu')
+        start = act.get('start_date_local', '')[:10]
+        dist_km = act.get('distance', 0) / 1000.0
+        dur_min = act.get('moving_time', 0) / 60.0
+        hr_avg = act.get('average_heartrate', 'N/A')
+        d_plus = act.get('total_elevation_gain', 0)
+        ic_load = act.get('icu_training_load', 'N/A')
         
-    activities = get_activities(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+        summary_list.append(
+            f"- {start} | {name} ({type_act}) : {dist_km:.2f} km, {dur_min:.0f} min, "
+            f"D+ {d_plus}m, FC moy {hr_avg} bpm, Load {ic_load}"
+        )
     
-    if activities:
-        st.success(f"{len(activities)} activité(s) trouvée(s) pour cette semaine.")
-        
-        summary = ""
-        total_dist = 0
-        total_tss = 0
-        for a in activities:
-            d = a.get('distance', 0) / 1000
-            total_dist += d
-            total_tss += a.get('icu_training_load', 0) or 0
-            summary += f"- {a.get('start_date_local')[:10]} | {a.get('name')} ({a.get('type')}) : {d:.1f} km, TSS: {a.get('icu_training_load')}, FC moy: {a.get('average_heartrate')} bpm\n"
-        
-        default_prompt = f"""Tu es mon entraîneur expert en endurance. 
-Voici le bilan de ma semaine du {start_date.strftime('%d/%m')} au {end_date.strftime('%d/%m')} :
-- Nombre de séances : {len(activities)}
-- Volume total : {total_dist:.1f} km
-- Charge totale (TSS) : {total_tss}
+    activities_str = "\n".join(summary_list)
+    prompt_context = (
+        f"Voici le récapitulatif des séances de l'athlète depuis le {start_date_iso} :\n\n"
+        f"{activities_str}\n\n"
+        "Fais un bilan global du volume, de la charge d'entraînement et de la répartition du dénivelé."
+    )
 
-Détail des séances :
-{summary}
-
-Analyse ma semaine :
-1. Évalue la répartition du volume et de l'intensité.
-2. Identifie les points forts et les risques de surmenage.
-3. Propose des recommandations claires pour la semaine suivante.
-"""
-        custom_prompt = st.text_area("✍️ Consigne / Question pour le Coach :", value=default_prompt, height=250)
-        
-        if st.button("🚀 Lancer l'analyse de la semaine", type="primary"):
-            with st.spinner("Analyse par Gemini en cours..."):
-                try:
-                    res = client.models.generate_content(model=MODEL_NAME, contents=custom_prompt)
-                    st.markdown(res.text)
-                except Exception as e:
-                    st.error(f"Erreur Gemini : {e}")
-
-# --- MODE 3 : 30 DERNIERS JOURS ---
-elif mode == "30 derniers jours":
-    st.subheader("📈 Bilan du mois écoulé")
+else:
+    # Mode séance spécifique
+    act_titles = [f"{a.get('start_date_local', '')[:10]} - {a.get('name', 'Sans titre')}" for a in activities]
+    selected_act_idx = st.selectbox("Sélectionne la séance à analyser en détail :", range(len(activities)), format_func=lambda i: act_titles[i])
     
-    oldest_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    activities = get_activities(oldest_date)
+    act = activities[selected_act_idx]
+    act_id = act.get('id')
     
-    if activities:
-        summary = ""
-        for a in activities[-15:]:
-            d = a.get('distance', 0) / 1000
-            summary += f"- {a.get('start_date_local')[:10]} | {a.get('name')} ({a.get('type')}) : {d:.1f} km, TSS: {a.get('icu_training_load')}\n"
+    name = act.get('name', 'Sans titre')
+    type_act = act.get('type', 'Inconnu')
+    start = act.get('start_date_local', '')[:10]
+    dist_km = act.get('distance', 0) / 1000.0
+    dur_min = act.get('moving_time', 0) / 60.0
+    hr_avg = act.get('average_heartrate', 'N/A')
+    d_plus = act.get('total_elevation_gain', 0)
+    ic_load = act.get('icu_training_load', 'N/A')
+    
+    # Récupération des streams
+    streams = get_activity_streams(act_id)
+    streams_summary = ""
+    
+    if streams:
+        # Filtrage des valeurs None dans les listes de streams
+        hr_data = [x for x in streams.get('heartrate', []) if x is not None]
+        watts_data = [x for x in streams.get('watts', []) if x is not None]
+        cad_data = [x for x in streams.get('cadence', []) if x is not None]
+        alt_data = [x for x in streams.get('altitude', []) if x is not None]
+        
+        extra_metrics = []
+        if hr_data:
+            max_hr = max(hr_data)
+            min_hr = min(hr_data)
+            half = len(hr_data) // 2
+            avg_hr_h1 = sum(hr_data[:half]) / half if half > 0 else 0
+            avg_hr_h2 = sum(hr_data[half:]) / (len(hr_data) - half) if half > 0 else 0
+            drift = avg_hr_h2 - avg_hr_h1
+            extra_metrics.append(f"- FC min/max : {min_hr} / {max_hr} bpm")
+            extra_metrics.append(f"- Dérive cardiaque estimée (2e moitié - 1ère moitié) : {drift:+.1f} bpm")
+        
+        if watts_data:
+            max_w = max(watts_data)
+            avg_w = sum(watts_data) / len(watts_data)
+            extra_metrics.append(f"- Puissance moy/max : {avg_w:.0f} W / {max_w} W")
             
-        default_prompt = f"""Voici mes séances des 30 derniers jours (aperçu des 15 plus récentes) :
-{summary}
-
-Analyse la tendance globale de mon bloc d'entraînement :
-1. Progression du volume et de la charge.
-2. Risque de fatigue accumulée.
-3. Conseil stratégique pour mon prochain cycle.
-"""
-        custom_prompt = st.text_area("✍️ Consigne / Question pour le Coach :", value=default_prompt, height=250)
+        if cad_data:
+            avg_cad = sum(cad_data) / len(cad_data)
+            extra_metrics.append(f"- Cadence moyenne : {avg_cad:.0f} spm")
         
-        if st.button("🚀 Lancer l'analyse globale", type="primary"):
-            with st.spinner("Analyse par Gemini en cours..."):
-                try:
-                    res = client.models.generate_content(model=MODEL_NAME, contents=custom_prompt)
-                    st.markdown(res.text)
-                except Exception as e:
-                    st.error(f"Erreur Gemini : {e}")
+        if alt_data and len(alt_data) > 1:
+            d_plus_stream = sum(max(0, alt_data[i] - alt_data[i-1]) for i in range(1, len(alt_data)))
+            extra_metrics.append(f"- Dénivelé positif calculé sur les streams : {d_plus_stream:.0f} m")
+        
+        streams_summary = "\n".join(extra_metrics)
+
+    prompt_context = (
+        f"Voici le détail d'une séance spécifique :\n"
+        f"Nom: {name}\nType: {type_act}\nDate: {start}\n"
+        f"Distance: {dist_km:.2f} km\nDurée: {dur_min:.0f} min\n"
+        f"D+: {d_plus}m\nFC moyenne: {hr_avg} bpm\nCharge (Load): {ic_load}\n\n"
+        f"Métriques détaillées extraites des streams :\n{streams_summary if streams_summary else 'Pas de données de streams disponibles.'}\n\n"
+        "Analyse cette séance en détails (gestion d'allure, dérive cardiaque, adaptations recommandées)."
+    )
+
+# ---------------------------------------------------------
+# APPEL À L'API GEMINI & AFFICHAGE
+# ---------------------------------------------------------
+if st.button("🚀 Lancer l'analyse du Coach IA", type="primary"):
+    with st.spinner("Le coach analyse tes données..."):
+        try:
+            model = genai.GenerativeModel("gemini-1.5-pro")
+            full_prompt = f"{system_prompt}\n\n{prompt_context}"
+            
+            response = model.generate_content(full_prompt)
+            
+            st.markdown("### 📋 Analyse du Coach")
+            st.markdown(response.text)
+            
+        except Exception as e:
+            st.error(f"Erreur lors de la génération de l'analyse avec Gemini : {e}")
