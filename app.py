@@ -170,6 +170,21 @@ def client_gemini():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
+@st.cache_data(ttl=3600)
+def modeles_disponibles():
+    """Liste les modèles Gemini accessibles avec la clé (génération de texte)."""
+    try:
+        noms = [
+            m.name.removeprefix("models/")
+            for m in client_gemini().models.list()
+            if "generateContent" in (m.supported_actions or [])
+            and "gemini" in m.name
+        ]
+        return sorted(noms, reverse=True)
+    except Exception:
+        return []
+
+
 def demander(question, ids, modele):
     seances_memo = "\n".join(f"- {v}" for v in mem["seances"].values()) or "aucune"
     system = (
@@ -202,7 +217,13 @@ with st.sidebar:
     plage = st.date_input("Période", (date.today() - timedelta(days=7), date.today()))
     debut, fin = (plage[0], plage[-1]) if isinstance(plage, (list, tuple)) else (plage, plage)
     sport = st.radio("Sport", ["Tous", "Course", "Vélo"], horizontal=True)
-    modele = st.text_input("Modèle Gemini", "gemini-2.5-flash")
+    MODELE_DEFAUT = "gemini-3.6-flash"
+    liste = modeles_disponibles()
+    if liste:
+        idx = liste.index(MODELE_DEFAUT) if MODELE_DEFAUT in liste else 0
+        modele = st.selectbox("Modèle Gemini", liste, index=idx)
+    else:
+        modele = st.text_input("Modèle Gemini", MODELE_DEFAUT)
 
     st.header("🧠 Mémoire")
     st.caption(f"{len(mem['seances'])} séances · {len(mem['echanges'])} échanges")
