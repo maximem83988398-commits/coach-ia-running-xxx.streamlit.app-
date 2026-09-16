@@ -1,3 +1,4 @@
-streamlit
+streamlit>=1.40
 requests
+pandas
 google-genai
